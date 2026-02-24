@@ -1,465 +1,345 @@
 """
-pipeline.py
------------
-End-to-end analysis pipeline for NuSTAR non-detection upper limits.
+nustar_uplim.pipeline
+---------------------
+Top-level orchestration: per-module extraction and combined results.
 
-Orchestrates:
-  1. File discovery and loading
-  2. WCS setup
-  3. Source position conversion
-  4. Interactive/auto background region selection
-  5. Count extraction (source + background)
-  6. Poisson upper limit computation  → count-rate upper limits
-  7. WebPIMMS instructions printed for flux conversion
-  8. Step-by-step visualisation
-  9. Text + JSON report output
+Public API
+----------
+run_uplim(...)        — convenience wrapper; builds a Config and runs everything
+process_module(...)   — extract counts + exposure for one FPM, return results dict
+combine_modules(...)  — sum across FPMs and print combined upper limits
+print_results_table() — shared formatted output for both per-module and combined
 """
 
 import os
-import json
 import numpy as np
-from datetime import datetime
 
-from .io          import (find_event_cl_dir, load_events, load_sky_image,
-                           get_events_wcs, summary_table)
-from .coords      import parse_radec, arcsec_to_pixels, radec_to_pixels
-from .extraction  import extract_counts, ENERGY_BANDS, parse_band, load_exposure_map
-from .statistics  import compute_upper_limits, format_pimms_instructions
-from .visualization import (plot_sky_image, plot_regions, plot_event_scatter,
-                             plot_upper_limit_summary, plot_radial_profile,
-                             plot_combined_report)
-from .interactive import select_background_interactively
+from .config    import Config
+from .coords    import parse_coord, sky_to_evt_pixel, sky_to_img_pixel
+from .exposure  import compute_exposure_stats
+from .io        import locate_files, load_events, load_expmap
+from .statistics import net_count_rate, kraft_upper_limit, gehrels_upper_limit
+from .plots     import radial_profile, exposure_histogram
 
 
-MODULES = ("A", "B")
+# =============================================================================
+# RESULTS TABLE  (shared by process_module and combine_modules)
+# =============================================================================
 
-
-# ──────────────────────────────────────────────────────────────────────────
-
-class NuSTARUpperLimitPipeline:
+def print_results_table(N_src, B_scaled, t_eff, N_bkg_raw, area_ratio,
+                        confidence_levels):
     """
-    Main pipeline class.
+    Compute and print all three methods at every confidence level.
+
+    Columns
+    -------
+    CL          — one-sided confidence level
+    Net CR      — (N_src - B_scaled) / t_eff   [point estimate, not a UL]
+    Kraft S_ul  — Kraft+91 upper limit in counts
+    Kraft CR_ul — Kraft+91 upper limit in cts/s
+    Gehrels S_ul / CR_ul — Gehrels 1986 cross-check
+
+    Returns
+    -------
+    list of dicts, one per confidence level, with keys:
+        cl, CR_net, CR_sigma, S_kraft, CR_kraft, S_gehrels, CR_gehrels
+    """
+    header  = (f"  {'CL':>8}  {'Net CR (cts/s)':>18}  "
+               f"{'Kraft S_ul':>10}  {'Kraft CR_ul':>13}  "
+               f"{'Gehrels S_ul':>12}  {'Gehrels CR_ul':>13}")
+    divider = "  " + "-" * (len(header) - 2)
+
+    CR_net, CR_sigma = net_count_rate(N_src, B_scaled, t_eff,
+                                      N_bkg_raw, area_ratio)
+
+    print(f"\n  Point estimate  (N_src - B) / t_eff  [NOT an upper limit]")
+    print(f"    = ({N_src} - {B_scaled:.1f}) / {t_eff:.1f} s")
+    print(f"    = {CR_net:+.4e} cts/s  ±  {CR_sigma:.4e}  (1-sigma Poisson)")
+    if CR_net < 0:
+        print(f"    (Negative — source aperture below expected background: "
+              f"clean non-detection)")
+
+    print(f"\n  Upper limits:")
+    print(header)
+    print(divider)
+
+    results = []
+    for cl in confidence_levels:
+        S_k  = kraft_upper_limit(N_src, B_scaled, cl)
+        S_g  = gehrels_upper_limit(N_src, B_scaled, cl)
+        CR_k = S_k / t_eff
+        CR_g = S_g / t_eff
+        results.append({
+            'cl':          cl,
+            'CR_net':      CR_net,
+            'CR_sigma':    CR_sigma,
+            'S_kraft':     S_k,
+            'CR_kraft':    CR_k,
+            'S_gehrels':   S_g,
+            'CR_gehrels':  CR_g,
+        })
+        print(f"  {cl:8.4f}  {CR_net:+18.4e}  "
+              f"{S_k:10.3f}  {CR_k:13.4e}  "
+              f"{S_g:12.3f}  {CR_g:13.4e}")
+
+    print(divider)
+    print(f"  Net CR is a point estimate. Kraft and Gehrels are upper limits.")
+    print(f"  Divide all count rates by the aperture EEF (~0.80 at 60\") "
+          f"to correct for flux outside the aperture.")
+    return results
+
+
+# =============================================================================
+# PER-MODULE PIPELINE
+# =============================================================================
+
+def process_module(module, src_coord, cfg):
+    """
+    Full extraction and result calculation for one FPM.
 
     Parameters
     ----------
-    base_path      : str  — parent directory containing the obsid folder
-    obsid          : str  — NuSTAR observation ID
-    ra             : str or float  — source RA (any format)
-    dec            : str or float  — source Dec (any format)
-    src_radius_as  : float — source region radius in arcseconds (default 30")
-    bkg_radius_as  : float — background region radius in arcseconds (default 90")
-    energy_band    : str  — 'full', 'soft', 'hard', 'ultrahard' (default 'soft')
-    bkg_mode       : str  — 'interactive', 'annulus', or 'auto'
-    modules        : list of str, e.g. ['A', 'B']
-    confidence_levels : tuple — default (0.9545, 0.9973) for 2σ, 3σ
-    out_dir        : str or None — save plots/reports here
-    show_plots     : bool — display plots interactively
-    stat_method    : str  — 'background_inclusive' | 'frequentist' | 'bayesian'
+    module    : str              — 'A' or 'B'
+    src_coord : SkyCoord         — source sky position
+    cfg       : Config
 
-    Note: Flux conversion is intentionally omitted. Use the output count-rate
-    upper limits with WebPIMMS (https://cxc.harvard.edu/toolkit/pimms.jsp)
-    and your preferred spectral model.
+    Returns
+    -------
+    dict with keys:
+        module, N_src, N_bkg_raw, B_scaled, area_ratio, net_counts,
+        t_eff_s, exp_stats, ul, energy
     """
+    e_lo, e_hi = cfg.resolve_energy_band()
+    out_dir    = os.path.join(cfg.base_path, cfg.obsid, "ul_products")
+    os.makedirs(out_dir, exist_ok=True)
 
-    def __init__(self,
-                 base_path,
-                 obsid,
-                 ra,
-                 dec,
-                 src_radius_as=20.0,
-                 bkg_radius_as=100.0,
-                 energy_band="soft",  # 3-10 keV default
-                 bkg_mode="auto",
-                 modules=("A", "B"),
-                 confidence_levels=(0.9545, 0.9973),
-                 out_dir=None,
-                 show_plots=True,
-                 stat_method="background_inclusive"):
+    print(f"\n{'='*62}")
+    print(f"  FPM{module}")
+    print(f"{'='*62}")
 
-        self.base_path     = str(base_path)
-        self.obsid         = str(obsid).strip()
-        self.ra_input      = ra
-        self.dec_input     = dec
-        self.src_radius_as = float(src_radius_as)
-        self.bkg_radius_as = float(bkg_radius_as)
-        self.energy_band   = energy_band
-        self.bkg_mode      = bkg_mode
-        self.modules       = list(modules)
-        self.confidence_levels = confidence_levels
-        self.out_dir       = out_dir
-        self.show_plots    = show_plots
-        self.stat_method   = stat_method
+    # -- Locate and load files ------------------------------------------------
+    evt_file, exp_file = locate_files(cfg.base_path, cfg.obsid, module)
+    print(f"  Event file  : {os.path.basename(evt_file)}")
+    print(f"  Expo map    : {os.path.basename(exp_file)}")
 
-        self.results       = {}
+    evts, evt_hdr, PI_lo, PI_hi = load_events(evt_file, e_lo, e_hi)
+    print(f"  Energy filter [{e_lo:.1f}-{e_hi:.1f} keV]  "
+          f"PI=[{PI_lo},{PI_hi}]  ->  {len(evts):,} events")
 
-    # ── Run ─────────────────────────────────────────────────────────────
+    exp_data, exp_hdr = load_expmap(exp_file)
 
-    def run(self):
-        """Execute the full analysis pipeline."""
-        print("\n" + "═"*60)
-        print("  NuSTAR Non-Detection Upper Limit Pipeline")
-        print("  nustar_uplim  v1.0")
-        print("═"*60)
+    # -- Source pixel positions -----------------------------------------------
+    cx_evt, cy_evt, pscale_evt = sky_to_evt_pixel(
+        src_coord.ra.deg, src_coord.dec.deg, evt_hdr)
+    cx_exp, cy_exp, pscale_exp = sky_to_img_pixel(
+        src_coord.ra.deg, src_coord.dec.deg, exp_hdr)
 
-        self._parse_coordinates()
+    # -- Sanity check ---------------------------------------------------------
+    evt_x = evts['X'].astype(float)
+    evt_y = evts['Y'].astype(float)
+    print(f"\n  Event X range       : [{evt_x.min():.0f}, {evt_x.max():.0f}]")
+    print(f"  Event Y range       : [{evt_y.min():.0f}, {evt_y.max():.0f}]")
+    print(f"  Source pixel (evt)  : ({cx_evt:.1f}, {cy_evt:.1f})")
+    print(f"  Source pixel (exp)  : ({cx_exp:.1f}, {cy_exp:.1f})")
+    x_ok = evt_x.min() <= cx_evt <= evt_x.max()
+    y_ok = evt_y.min() <= cy_evt <= evt_y.max()
+    if not (x_ok and y_ok):
+        print(f"  !! WARNING: source pixel is OUTSIDE the event X/Y range — "
+              f"check your coordinates!")
+    else:
+        print(f"  Source position is inside the event image. Good.")
 
-        self.event_cl_dir = find_event_cl_dir(self.base_path, self.obsid)
-        summary_table(self.event_cl_dir, self.obsid)
+    # -- Pixel radii ----------------------------------------------------------
+    r_src_evt        = cfg.src_radius_arcsec / pscale_evt
+    r_src_exp        = cfg.src_radius_arcsec / pscale_exp
+    fwhm_pix         = cfg.psf_fwhm_arcsec   / pscale_exp
+    r_bkg_in_arcsec  = cfg.src_radius_arcsec * cfg.bkg_inner_factor
+    r_bkg_out_arcsec = cfg.bkg_radius_arcsec
+    r_bkg_in_evt     = r_bkg_in_arcsec  / pscale_evt
+    r_bkg_out_evt    = r_bkg_out_arcsec / pscale_evt
 
-        per_module = {}
-        images, wcss = {}, {}
+    print(f"  Pixel scale (evt)   : {pscale_evt:.3f} \"/pix")
+    print(f"  Pixel scale (exp)   : {pscale_exp:.3f} \"/pix")
+    print(f"  Src aperture        : {cfg.src_radius_arcsec:.1f}\" = {r_src_evt:.1f} pix")
+    print(f"  Bkg annulus         : {r_bkg_in_arcsec:.1f}\" -- {r_bkg_out_arcsec:.1f}\"")
 
-        for mod in self.modules:
-            print(f"\n{'─'*60}")
-            print(f"  Processing FPM-{mod}")
-            print(f"{'─'*60}")
-            try:
-                result = self._process_module(mod)
-                per_module[mod] = result
-                images[mod] = result["image"]
-                wcss[mod]   = result["wcs"]
-            except FileNotFoundError as e:
-                print(f"  [SKIP] FPM-{mod}: {e}")
+    # -- Source counts --------------------------------------------------------
+    d_src = np.sqrt((evt_x - cx_evt)**2 + (evt_y - cy_evt)**2)
+    N_src = int(np.sum(d_src <= r_src_evt))
 
-        if not per_module:
-            raise RuntimeError("No modules could be processed. Check file paths.")
+    # -- Background counts ----------------------------------------------------
+    if cfg.bkg_mode == 'annulus':
+        in_annulus = (d_src > r_bkg_in_evt) & (d_src <= r_bkg_out_evt)
+        N_bkg_raw  = int(np.sum(in_annulus))
+        area_src   = np.pi * r_src_evt**2
+        area_bkg   = np.pi * (r_bkg_out_evt**2 - r_bkg_in_evt**2)
 
-        self._plot_combined(per_module, images, wcss)
-        self._write_report(per_module)
+    elif cfg.bkg_mode == 'manual':
+        bkg_coord      = parse_coord(cfg.bkg_ra, cfg.bkg_dec)
+        cx_b, cy_b, _  = sky_to_evt_pixel(
+            bkg_coord.ra.deg, bkg_coord.dec.deg, evt_hdr)
+        r_bkg_circ     = cfg.bkg_radius_arcsec / pscale_evt
+        d_bkg          = np.sqrt((evt_x - cx_b)**2 + (evt_y - cy_b)**2)
+        N_bkg_raw      = int(np.sum(d_bkg <= r_bkg_circ))
+        area_src       = np.pi * r_src_evt**2
+        area_bkg       = np.pi * r_bkg_circ**2
+    else:
+        raise ValueError(f"Unknown bkg_mode: '{cfg.bkg_mode}'")
 
-        # Print WebPIMMS guidance for all modules + confidence levels
-        self._print_pimms_block(per_module)
+    area_ratio = area_src / area_bkg
+    B_scaled   = N_bkg_raw * area_ratio
 
-        self.results = per_module
-        return per_module
+    print(f"\n  Source counts  (N_src)        : {N_src}")
+    print(f"  Background counts (raw)       : {N_bkg_raw}")
+    print(f"  Area ratio  (src / bkg)       : {area_ratio:.5f}")
+    print(f"  Scaled background B           : {B_scaled:.3f} cts")
+    print(f"  Net counts  (N_src - B)       : {N_src - B_scaled:.3f} cts")
 
-    # ── Coordinate parsing ───────────────────────────────────────────────
+    # -- Effective exposure ---------------------------------------------------
+    exp_stats, exp_meta = compute_exposure_stats(
+        exp_data, cx_exp, cy_exp, r_src_exp, fwhm_pix)
 
-    def _parse_coordinates(self):
-        print(f"\n  Parsing coordinates: RA='{self.ra_input}', Dec='{self.dec_input}'")
-        self.src_ra, self.src_dec = parse_radec(self.ra_input, self.dec_input)
-        print(f"  → RA = {self.src_ra:.6f}°,  Dec = {self.src_dec:.6f}°")
+    print(f"\n  Pixels in aperture (total)    : {exp_meta['n_pix_total']}")
+    print(f"  Pixels in aperture (non-zero) : {exp_meta['n_pix_nonzero']}")
+    print(f"  -- Exposure statistics ----------------------------------------")
+    for key, label in [
+            ('median',       'Median        [RECOMMENDED]          '),
+            ('mean',         'Mean          [diagnostic]           '),
+            ('psf_weighted', 'PSF-wtd mean  [on-axis diag. only]   ')]:
+        tag = ' <-- PRIMARY' if key == cfg.exp_stat else ''
+        print(f"    {label} : {exp_stats[key]/1e3:7.3f} ks{tag}")
 
-    # ── Per-module processing ────────────────────────────────────────────
+    t_eff = exp_stats[cfg.exp_stat]
+    print(f"\n  Using t_eff = {t_eff/1e3:.3f} ks  ({cfg.exp_stat})")
 
-    def _process_module(self, mod):
-        events, ev_hdr, exposure = load_events(self.event_cl_dir, self.obsid, mod)
-        image, wcs, img_hdr      = load_sky_image(self.event_cl_dir, self.obsid, mod)
+    # -- Results table --------------------------------------------------------
+    ul_results = print_results_table(
+        N_src, B_scaled, t_eff, N_bkg_raw, area_ratio, cfg.confidence_levels)
 
-        try:
-            ev_wcs, _, _ = get_events_wcs(ev_hdr)
-        except Exception:
-            ev_wcs = wcs
+    # -- Diagnostic plots -----------------------------------------------------
+    if cfg.save_plots:
+        radial_profile(evt_x, evt_y, cx_evt, cy_evt, pscale_evt,
+                       module, e_lo, e_hi, cfg.obsid, cfg, out_dir)
+        exposure_histogram(exp_meta, exp_stats, module, cfg, out_dir)
 
-        src_cx, src_cy = radec_to_pixels(self.src_ra, self.src_dec, wcs)
-        src_r_pix      = arcsec_to_pixels(self.src_radius_as, wcs)
-        bkg_r_pix      = arcsec_to_pixels(self.bkg_radius_as, wcs)
+    return {
+        'module':     module,
+        'N_src':      N_src,
+        'N_bkg_raw':  N_bkg_raw,
+        'B_scaled':   B_scaled,
+        'area_ratio': area_ratio,
+        'net_counts': N_src - B_scaled,
+        't_eff_s':    t_eff,
+        'exp_stats':  exp_stats,
+        'ul':         ul_results,
+        'energy':     (e_lo, e_hi),
+    }
 
-        print(f"  Source pixel:   ({src_cx:.1f}, {src_cy:.1f})")
-        print(f"  Source radius:  {src_r_pix:.1f} px ({self.src_radius_as:.1f}\")")
-        print(f"  Bkg radius:     {bkg_r_pix:.1f} px ({self.bkg_radius_as:.1f}\")")
 
-        # Step 1: sky image
-        print(f"\n  [Step 1] Plotting sky image...")
-        plot_sky_image(
-            image, wcs, self.src_ra, self.src_dec,
-            src_r_pix, src_cx, src_cy,
-            obsid=self.obsid, module=mod, band=self.energy_band,
-            out_dir=self.out_dir, show=self.show_plots,
-        )
+# =============================================================================
+# COMBINED (FPM-A + FPM-B)
+# =============================================================================
 
-        # Background region
-        bkg_ra, bkg_dec, bkg_r_pix, bkg_type, bkg_inner = \
-            self._select_background(mod, image, wcs, src_cx, src_cy,
-                                    src_r_pix, bkg_r_pix)
+def combine_modules(results_list, cfg):
+    """
+    Sum counts across FPMs and compute combined results.
 
-        # Step 2: regions overlay
-        print(f"\n  [Step 2] Plotting regions...")
-        bkg_cx, bkg_cy = radec_to_pixels(bkg_ra, bkg_dec, wcs)
-        plot_regions(
-            image, wcs,
-            src_cx, src_cy, src_r_pix,
-            bkg_cx, bkg_cy, bkg_r_pix,
-            bkg_type=bkg_type, bkg_inner_pix=bkg_inner,
-            obsid=self.obsid, module=mod,
-            out_dir=self.out_dir, show=self.show_plots,
-        )
+    Combining strategy
+    ------------------
+    N_total  = sum(N_src)       counts are additive across independent detectors
+    B_total  = sum(B_scaled)    each B already corrected to source aperture area
+    t_comb   = sum(t_eff)       exposures add — correct for additive counts.
+                                Using mean(t) would be inconsistent.
+    area_ratio is identical for both FPMs (same aperture geometry).
 
-        # Try to load optional exposure map (vignetting correction)
-        exp_map, exp_wcs_obj = load_exposure_map(
-            self.event_cl_dir, self.obsid, mod)
-        if exp_map is None:
-            print("  Exposure map not found — skipping vignetting correction.")
-            print("  (Run nuexpomap in HEASoft to generate it if needed.)")
+    Parameters
+    ----------
+    results_list : list of dicts returned by process_module()
+    cfg          : Config
+    """
+    print(f"\n{'='*62}")
+    print("  COMBINED  FPM-A + FPM-B")
+    print(f"{'='*62}")
 
-        # Extract counts
-        band_info = parse_band(self.energy_band)
-        print(f"\n  [Step 3] Extracting counts — {band_info[4]}  "
-              f"(PI {band_info[0]}–{band_info[1]})...")
-        extr = extract_counts(
-            events, ev_wcs,
-            self.src_ra, self.src_dec, src_r_pix,
-            bkg_ra, bkg_dec, bkg_r_pix,
-            bkg_type=bkg_type, bkg_inner_pix=bkg_inner,
-            energy_band=self.energy_band,
-            exp_map=exp_map, exp_wcs=exp_wcs_obj,
-        )
-        print(f"  → Source counts:   {extr['src_counts']}")
-        print(f"  → Background cts:  {extr['bkg_counts']}  (α={extr['alpha']:.4f})")
-        print(f"  → Expected bkg:    {extr['expected_bkg']:.2f}")
-        print(f"  → Net counts:      {extr['net_counts']:.2f}")
+    N_total     = sum(r['N_src']     for r in results_list)
+    B_total     = sum(r['B_scaled']  for r in results_list)
+    N_bkg_total = sum(r['N_bkg_raw'] for r in results_list)
+    area_ratio  = results_list[0]['area_ratio']   # same for both FPMs
+    t_vals      = [r['t_eff_s'] for r in results_list]
+    t_comb      = float(np.sum(t_vals))           # SUM, not mean
 
-        # Event scatter
-        print(f"\n  [Step 3b] Plotting event scatter...")
-        plot_event_scatter(
-            extr["ev_x"], extr["ev_y"],
-            extr["src_mask"], extr["bkg_mask"],
-            src_cx, src_cy, src_r_pix,
-            bkg_cx, bkg_cy, bkg_r_pix, bkg_type,
-            bkg_inner_pix=bkg_inner,
-            obsid=self.obsid, module=mod, band=self.energy_band,
-            out_dir=self.out_dir, show=self.show_plots,
-        )
+    print(f"  Combined N_src    : {N_total}")
+    print(f"  Combined B_scaled : {B_total:.3f} cts")
+    for r in results_list:
+        print(f"  t_eff FPM-{r['module']}       : {r['t_eff_s']/1e3:.3f} ks")
+    print(f"  t_eff (combined)  : {t_comb/1e3:.3f} ks  "
+          f"[sum — correct for additive counts]")
 
-        # Radial profile
-        print(f"\n  [Step 4] Radial profile...")
-        plot_radial_profile(
-            extr["ev_x"], extr["ev_y"], src_cx, src_cy,
-            r_max=src_r_pix * 3,
-            obsid=self.obsid, module=mod, band=self.energy_band,
-            out_dir=self.out_dir, show=self.show_plots,
-        )
+    print_results_table(
+        N_total, B_total, t_comb, N_bkg_total, area_ratio,
+        cfg.confidence_levels)
 
-        # Compute upper limits (count rates only)
-        print(f"\n  [Step 5] Computing Poisson upper limits...")
-        stats = compute_upper_limits(
-            extr, exposure,
-            band=self.energy_band,
-            confidence_levels=self.confidence_levels,
-            method=self.stat_method,
-        )
 
-        # UL plot
-        plot_upper_limit_summary(
-            stats, obsid=self.obsid, band=self.energy_band,
-            out_dir=self.out_dir, show=self.show_plots,
-        )
+# =============================================================================
+# CONVENIENCE ENTRY POINT
+# =============================================================================
 
-        self._print_module_summary(mod, stats)
+def run_uplim(base_path, obsid, ra, dec, **kwargs):
+    """
+    Run the full upper-limit pipeline with minimal boilerplate.
 
-        return {
-            "events":    events,
-            "image":     image,
-            "wcs":       wcs,
-            "exposure":  exposure,
-            "extraction": extr,
-            "stats":     stats,
-            "src_cx": src_cx, "src_cy": src_cy, "src_r": src_r_pix,
-            "bkg_cx": bkg_cx, "bkg_cy": bkg_cy, "bkg_r": bkg_r_pix,
-            "bkg_type": bkg_type, "bkg_inner": bkg_inner,
-        }
+    Parameters
+    ----------
+    base_path : str   — root data directory
+    obsid     : str   — NuSTAR observation ID
+    ra        : str or float  — source RA
+    dec       : str or float  — source Dec
+    **kwargs  : any Config field by name, e.g.
+                    src_radius_arcsec=30.0,
+                    energy_band='soft',
+                    confidence_levels=[0.9973],
+                    save_plots=False
 
-    # ── Background selection ─────────────────────────────────────────────
+    Returns
+    -------
+    list of result dicts (one per module processed)
 
-    def _select_background(self, mod, image, wcs, src_cx, src_cy,
-                           src_r_pix, bkg_r_pix):
-        mode = self.bkg_mode.lower()
+    Example
+    -------
+    >>> from nustar_uplim import run_uplim
+    >>> results = run_uplim(
+    ...     base_path = "/data/NuSTAR/2017gas/",
+    ...     obsid     = "80202052002",
+    ...     ra        = "20:17:11.360",
+    ...     dec       = "+58:12:08.10",
+    ...     energy_band = 'soft',
+    ...     confidence_levels = [0.9545, 0.9973],
+    ... )
+    """
+    cfg = Config(base_path=base_path, obsid=obsid, ra=ra, dec=dec, **kwargs)
+    cfg.validate()
 
-        if mode == "annulus":
-            print("  Background mode: ANNULUS around source")
-            bkg_inner = src_r_pix
-            bkg_outer = bkg_r_pix if bkg_r_pix > bkg_inner else bkg_inner * 3
-            return (self.src_ra, self.src_dec,
-                    bkg_outer, "annulus", bkg_inner)
+    e_lo, e_hi = cfg.resolve_energy_band()
+    src_coord  = parse_coord(cfg.ra, cfg.dec)
 
-        if mode == "interactive":
-            return self._interactive_background(
-                mod, image, wcs, src_cx, src_cy, src_r_pix, bkg_r_pix)
+    print("NuSTAR Non-Detection Upper Limit")
+    print("=" * 62)
+    print(f"Source  :  RA = {src_coord.ra.deg:.6f} deg  "
+          f"Dec = {src_coord.dec.deg:.6f} deg")
+    if isinstance(cfg.energy_band, tuple):
+        band_label = f"{e_lo:.1f}-{e_hi:.1f} keV (custom)"
+    else:
+        band_label = f"'{cfg.energy_band}'  ({e_lo:.1f}-{e_hi:.1f} keV)"
+    print(f"Band    :  {band_label}")
+    print(f"Modules :  {', '.join(f'FPM{m}' for m in cfg.modules)}")
+    print(f"Exp stat:  {cfg.exp_stat}  (primary)")
 
-        # auto
-        h, w = image.shape
-        margin = bkg_r_pix * 2
-        near_edge = (src_cx < margin or src_cx > w - margin or
-                     src_cy < margin or src_cy > h - margin)
+    all_results = []
+    for mod in cfg.modules:
+        all_results.append(process_module(mod, src_coord, cfg))
 
-        if near_edge:
-            print("  Source is near image edge — launching interactive selector.")
-            return self._interactive_background(
-                mod, image, wcs, src_cx, src_cy, src_r_pix, bkg_r_pix)
-        else:
-            print("  Background mode: AUTO-ANNULUS around source")
-            bkg_inner = src_r_pix * 1.2
-            bkg_outer = max(bkg_r_pix, bkg_inner * 2.5)
-            return (self.src_ra, self.src_dec,
-                    bkg_outer, "annulus", bkg_inner)
+    if len(all_results) > 1:
+        combine_modules(all_results, cfg)
 
-    def _interactive_background(self, mod, image, wcs,
-                                 src_cx, src_cy, src_r_pix, bkg_r_pix):
-        bkg_ra, bkg_dec, bkg_r, confirmed = select_background_interactively(
-            image, wcs, src_cx, src_cy, src_r_pix, bkg_r_pix,
-            obsid=self.obsid, module=mod,
-        )
-        if not confirmed:
-            print("  Falling back to annulus background.")
-            bkg_inner = src_r_pix * 1.2
-            bkg_outer = max(bkg_r_pix, bkg_inner * 2.5)
-            return (self.src_ra, self.src_dec,
-                    bkg_outer, "annulus", bkg_inner)
-        return bkg_ra, bkg_dec, bkg_r, "circle", None
-
-    # ── Combined report figure ───────────────────────────────────────────
-
-    def _plot_combined(self, per_module, images, wcss):
-        print(f"\n  Generating combined report figure...")
-        mods = list(per_module.keys())
-        r_A  = per_module[mods[0]]
-        r_B  = per_module[mods[1]] if len(mods) > 1 else None
-
-        plot_combined_report(
-            images[mods[0]], wcss[mods[0]],
-            r_A["src_cx"], r_A["src_cy"], r_A["src_r"],
-            r_A["bkg_cx"], r_A["bkg_cy"], r_A["bkg_r"],
-            r_A["stats"],
-            image_B=images[mods[1]] if r_B else None,
-            wcs_B=wcss[mods[1]] if r_B else None,
-            src_cx_B=r_B["src_cx"] if r_B else None,
-            src_cy_B=r_B["src_cy"] if r_B else None,
-            src_r_B=r_B["src_r"]   if r_B else None,
-            bkg_cx_B=r_B["bkg_cx"] if r_B else None,
-            bkg_cy_B=r_B["bkg_cy"] if r_B else None,
-            bkg_r_B=r_B["bkg_r"]   if r_B else None,
-            stats_B=r_B["stats"]   if r_B else None,
-            obsid=self.obsid,
-            src_ra=self.src_ra, src_dec=self.src_dec,
-            band=self.energy_band,
-            out_dir=self.out_dir, show=self.show_plots,
-        )
-
-    # ── Printing ─────────────────────────────────────────────────────────
-
-    def _print_module_summary(self, mod, stats):
-        print(f"\n  ┌─ FPM-{mod} Results ─────────────────────────────────┐")
-        print(f"  │  Exposure:        {stats['exposure_s']:.0f} s")
-        print(f"  │  Source counts:   {stats['src_counts']}")
-        print(f"  │  Background:      {stats['bkg_counts']} cts  (α={stats['alpha']:.4f})")
-        print(f"  │  Net counts:      {stats['net_counts']:.1f}")
-        print(f"  │  Li-Ma signif:    {stats['lima_sig']:.2f}σ")
-        for sig, d in stats["upper_limits"].items():
-            print(f"  │  UL ({sig:6s}):    "
-                  f"{d['counts_ul']:.2f} cts  |  "
-                  f"{d['count_rate_ul']:.4e} cts/s  ← use in WebPIMMS")
-        print(f"  └─────────────────────────────────────────────────────┘")
-
-    def _print_pimms_block(self, per_module):
-        """Print WebPIMMS instructions for each module and confidence level."""
-        print("\n" + "═"*60)
-        print("  FLUX CONVERSION via WebPIMMS")
-        print("  https://cxc.harvard.edu/toolkit/pimms.jsp")
-        print("═"*60)
-        print("  Take the count-rate upper limit below and enter it into")
-        print("  WebPIMMS with your spectral model (power law, BB, APEC...)")
-        print("  and Galactic NH to get the flux upper limit.\n")
-
-        for mod, res in per_module.items():
-            ul = res["stats"]["upper_limits"]
-            # Print instructions for the most commonly used level (3σ)
-            preferred = list(ul.keys())[-1]   # last = highest sigma
-            cr = ul[preferred]["count_rate_ul"]
-            print(format_pimms_instructions(
-                cr, self.energy_band,
-                obsid=self.obsid, module=mod,
-                sigma_label=preferred,
-            ))
-
-            # Also print all levels in a compact table
-            print(f"  FPM-{mod} — all confidence levels:")
-            print(f"  {'Level':<10} {'Counts UL':>12} {'Count Rate UL':>16}")
-            print(f"  {'─'*40}")
-            for sig, d in ul.items():
-                print(f"  {sig:<10} {d['counts_ul']:>12.2f} {d['count_rate_ul']:>16.4e} cts/s")
-            print()
-
-    # ── Report files ──────────────────────────────────────────────────────
-
-    def _write_report(self, per_module):
-        if self.out_dir is None:
-            return
-
-        os.makedirs(self.out_dir, exist_ok=True)
-
-        # JSON
-        report_data = {
-            "obsid":        self.obsid,
-            "src_ra_deg":   self.src_ra,
-            "src_dec_deg":  self.src_dec,
-            "energy_band":  self.energy_band,
-            "stat_method":  self.stat_method,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "pimms_url":    "https://cxc.harvard.edu/toolkit/pimms.jsp",
-            "note":         (
-                "Use count_rate_ul values in WebPIMMS with Mission=NuSTAR, "
-                "your spectral model and Galactic NH to obtain flux upper limits."
-            ),
-            "modules": {},
-        }
-        for mod, res in per_module.items():
-            s  = res["stats"]
-            ul = s["upper_limits"]
-            report_data["modules"][f"FPM{mod}"] = {
-                "exposure_s":   s["exposure_s"],
-                "src_counts":   s["src_counts"],
-                "bkg_counts":   s["bkg_counts"],
-                "alpha":        s["alpha"],
-                "expected_bkg": s["expected_bkg"],
-                "net_counts":   s["net_counts"],
-                "lima_sigma":   s["lima_sig"],
-                "upper_limits": {
-                    k: {
-                        "confidence":    v["confidence"],
-                        "counts_ul":     v["counts_ul"],
-                        "count_rate_ul_cts_s": v["count_rate_ul"],
-                        "webpimms_note": (
-                            f"Enter {v['count_rate_ul']:.4e} cts/s as input "
-                            f"count rate in WebPIMMS with Mission=NUSTAR FPM{mod}."
-                        ),
-                    }
-                    for k, v in ul.items()
-                },
-            }
-
-        json_path = os.path.join(self.out_dir, "nustar_uplim_results.json")
-        with open(json_path, "w") as f:
-            json.dump(report_data, f, indent=2)
-        print(f"\n  Results saved → {json_path}")
-
-        # Plain text
-        txt_path = os.path.join(self.out_dir, "nustar_uplim_results.txt")
-        with open(txt_path, "w") as f:
-            f.write("NuSTAR Non-Detection Upper Limit Analysis\n")
-            f.write("=" * 60 + "\n")
-            f.write(f"ObsID:         {self.obsid}\n")
-            f.write(f"Source RA:     {self.src_ra:.6f} deg\n")
-            f.write(f"Source Dec:    {self.src_dec:.6f} deg\n")
-            f.write(f"Energy band:   {self.energy_band.upper()}\n")
-            f.write(f"Stat method:   {self.stat_method}\n")
-            f.write(f"Generated:     {datetime.utcnow().isoformat()}Z\n")
-            f.write("=" * 60 + "\n")
-            f.write("\nFLUX CONVERSION: Use count_rate_ul in WebPIMMS\n")
-            f.write("  https://cxc.harvard.edu/toolkit/pimms.jsp\n")
-            f.write("  Mission: NUSTAR, choose your spectral model + NH\n\n")
-            for mod, res in per_module.items():
-                s  = res["stats"]
-                ul = s["upper_limits"]
-                f.write(f"FPM-{mod}\n")
-                f.write(f"  Exposure:    {s['exposure_s']:.0f} s\n")
-                f.write(f"  Src counts:  {s['src_counts']}\n")
-                f.write(f"  Bkg counts:  {s['bkg_counts']}  (alpha={s['alpha']:.4f})\n")
-                f.write(f"  Net counts:  {s['net_counts']:.1f}\n")
-                f.write(f"  Li-Ma sig:   {s['lima_sig']:.2f} sigma\n")
-                for sig, d in ul.items():
-                    f.write(
-                        f"  UL({sig:6s}): {d['counts_ul']:.2f} cts  "
-                        f"{d['count_rate_ul']:.4e} cts/s\n"
-                    )
-                f.write("\n")
-        print(f"  Report saved  → {txt_path}")
+    print("\nDone.")
+    return all_results

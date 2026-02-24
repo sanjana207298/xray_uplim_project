@@ -1,446 +1,248 @@
 # nustar_uplim
 
-**Python pipeline for NuSTAR non-detection upper limits**
+**NuSTAR count-rate upper limits for non-detections.**
 
-> When your source is too faint to appear in the standard NuSTAR pipeline products,
-> `nustar_uplim` extracts counts from cleaned event files, computes rigorous Poisson
-> upper limits, and converts them to physical flux and luminosity limits — with
-> step-by-step diagnostic plots and an interactive background selector.
+A clean Python package for computing statistically rigorous X-ray count-rate upper limits from NuSTAR data when a source is not detected. Implements Kraft et al. (1991) as the primary method, with Gehrels (1986) as a cross-check and a simple net-rate point estimate for comparison.
 
 ---
 
-## Table of Contents
+## Methods
 
-1. [Installation](#installation)
-2. [Quick Start](#quick-start)
-3. [Usage](#usage)
-4. [The Science](#the-science)
-5. [Statistical Methods](#statistical-methods)
-6. [Energy Conversion Factors](#energy-conversion-factors)
-7. [Output Files](#output-files)
-8. [NuSTAR File Structure](#nustar-file-structure)
-9. [Limitations and Caveats](#limitations-and-caveats)
-10. [References](#references)
+### Upper limits
+
+| Method | Reference | Notes |
+|--------|-----------|-------|
+| **Kraft et al. 1991** | ApJ 374, 344 | Bayesian posterior with uniform prior on S ≥ 0. Solved exactly via the regularised incomplete Gamma function — numerically stable at any count level. Standard method for X-ray non-detections. |
+| **Gehrels 1986** | ApJ 303, 336 | Closed-form Poisson approximation. Printed as a cross-check; slightly overestimates at low N. |
+
+### Net count rate (point estimate)
+
+```
+CR_net = (N_src - B_scaled) / t_eff
+```
+
+This is **not an upper limit** — it is the background-subtracted count rate with its 1-sigma Poisson uncertainty. Printed alongside the proper upper limits for comparison. Can be negative for a clean non-detection.
+
+The 1-sigma uncertainty is propagated correctly through the background area scaling:
+
+```
+sigma = sqrt(N_src + N_bkg_raw * area_ratio²) / t_eff
+```
+
+### Effective exposure time
+
+Read from the NuSTAR **exposure map** (not the header `LIVETIME`). The exposure map encodes vignetting, dead-time, and chip gaps in a single image. For a non-detection, the **median** of non-zero exposure-map pixels inside the source aperture is recommended:
+
+- Makes no assumption about PSF shape or source centring
+- Robust against partially-clipped chip-gap edge pixels
+- Easy to justify in a methods section
+
+All three statistics (median, mean, PSF-weighted mean) are always printed for comparison.
+
+> **Note on PSF-weighted mean:** This is provided as a diagnostic only. It assumes an on-axis circular Gaussian PSF, which is not appropriate for off-axis NuSTAR sources (the PSF broadens and becomes asymmetric off-axis).
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/nustar_uplim.git
+git clone https://github.com/sanjana207298/nustar_uplim.git
 cd nustar_uplim
-pip install -r requirements.txt
-# Or install as a package:
 pip install -e .
 ```
 
-You will need Python ≥ 3.8 and a working `matplotlib` backend for interactive plots
-(install `PyQt5` or `PyQt6` if plots don't appear).
-
----
-
-## Quick Start
+Or without installing:
 
 ```bash
-# Minimal invocation
-python nustar_analysis.py \
-    --path /data/nustar \
-    --obsid 90601606002 \
-    --ra "05 00 13.72" \
-    --dec "-03 20 51.20"
-
-# Interactive guided mode
-python nustar_analysis.py --interactive
-
-# Save results, no interactive window
-python nustar_analysis.py \
-    --path /data/nustar \
-    --obsid 90601606002 \
-    --ra "05 00 13.72" \
-    --dec "-03 20 51.20" \
-    --src-radius 30 \
-    --bkg-radius 90 \
-    --band soft \
-    --bkg-mode annulus \
-    --out-dir ./results_sn2024xyz \
-    --no-show-plots
+pip install -r requirements.txt
+python run_uplim.py
 ```
 
-Or use it as a Python library:
+---
+
+## Quickstart
+
+### As a script
+
+Edit the `CONFIG` block in `run_uplim.py` and run:
+
+```bash
+python run_uplim.py
+```
+
+### From Python / Jupyter
 
 ```python
-from nustar_uplim import NuSTARUpperLimitPipeline
+from nustar_uplim import run_uplim
 
-pipe = NuSTARUpperLimitPipeline(
-    base_path     = "/data/nustar",
-    obsid         = "90601606002",
-    ra            = "05 00 13.72",        # any format
-    dec           = "-03 20 51.20",
-    src_radius_as = 30.0,                 # arcseconds
-    bkg_radius_as = 90.0,
-    energy_band   = "soft",               # 3–10 keV
-    bkg_mode      = "auto",               # interactive if near edge
-    out_dir       = "./results",
-    show_plots    = True,
+results = run_uplim(
+    base_path = "/data/NuSTAR/2017gas/",
+    obsid     = "80202052002",
+    ra        = "20:17:11.360",
+    dec       = "+58:12:08.10",
+    energy_band       = "soft",          # 3-10 keV
+    confidence_levels = [0.9545, 0.9973],
 )
-results = pipe.run()
-
-# Access numerical results
-fpma = results["A"]["stats"]
-print(f"3σ flux UL (FPMA): {fpma['upper_limits']['3sigma']['flux_ul']:.2e} erg/cm²/s")
 ```
 
-### Supported RA/Dec formats
+### Custom energy band
 
-Any of the following work for both `--ra` and `--dec`:
+```python
+results = run_uplim(
+    base_path = "/data/NuSTAR/",
+    obsid     = "80202052002",
+    ra        = "20:17:11.360",
+    dec       = "+58:12:08.10",
+    energy_band = (8.0, 30.0),   # custom keV range
+)
+```
 
-| Format | Example RA | Example Dec |
-|---|---|---|
-| Sexagesimal (space) | `"05 00 13.72"` | `"-03 20 51.20"` |
-| Sexagesimal (colon) | `"05:00:13.72"` | `"-03:20:51.20"` |
-| Unit string | `"05h00m13.72s"` | `"-03d20m51.2s"` |
-| Decimal degrees | `"75.057167"` | `"-3.347556"` |
-| Float | `75.057167` | `-3.347556` |
+### Manual background region
 
----
-
-## Usage
-
-### Command-line arguments
-
-| Argument | Default | Description |
-|---|---|---|
-| `--path` | required | Parent directory of the ObsID folder |
-| `--obsid` | required | NuSTAR ObsID string |
-| `--ra` | required | Source RA (any format) |
-| `--dec` | required | Source Dec (any format) |
-| `--src-radius` | 20 | Source circle radius (arcseconds). NuSTAR PSF HPD ~58" so 20" captures the brightest core |
-| `--bkg-radius` | 100 | Background region radius (arcseconds) |
-| `--bkg-mode` | auto | `auto`, `interactive`, or `annulus` |
-| `--band` | soft | Named: `full` (3–79 keV), `soft` (3–10 keV), `hard` (10–30 keV), `ultrahard` (30–79 keV). Custom keV range: `8-30`, `15:50` |
-| `--modules` | A B | Which FPM modules to process |
-| `--stat-method` | background_inclusive | Statistical method (see below) |
-| `--confidence` | 0.9545 0.9973 | Confidence levels (2σ and 3σ) |
-| `--out-dir` | — | Save plots and report here |
-| `--no-show-plots` | — | Suppress interactive display |
-| `--interactive` | — | Prompt for all parameters |
-
-### Background modes
-
-- **`annulus`**: Background is extracted from an annular ring centred on the source
-  (inner radius = source radius; outer radius = `--bkg-radius`). Best for isolated
-  sources away from chip edges.
-
-- **`interactive`**: A matplotlib window opens showing the sky image with the source
-  circle. You click anywhere on the image to place a background circle. Scroll to
-  resize it. Press Enter or close the window to confirm.
-  Use this when the source is near an edge or there are nearby contaminating sources.
-
-- **`auto`** (default): Uses `annulus` if the source is well away from the chip edge;
-  automatically falls back to `interactive` if the source is near an edge.
+```python
+results = run_uplim(
+    base_path = "/data/NuSTAR/",
+    obsid     = "80202052002",
+    ra        = "20:17:11.360",
+    dec       = "+58:12:08.10",
+    bkg_mode  = "manual",
+    bkg_ra    = "20:17:25.0",
+    bkg_dec   = "+58:14:00.0",
+    bkg_radius_arcsec = 100.0,
+)
+```
 
 ---
 
-## The Science
+## File structure expected
 
-### Why non-detections require special treatment
+Standard `nupipeline` output:
 
-The standard NuSTAR pipeline (`nupipeline` + `nuproducts`) is designed for detected
-sources. For undetected sources, it produces no spectrum or meaningful count rate.
-However, a *non-detection* is scientifically informative — it places an **upper limit**
-on the source flux, which constrains physical models.
+```
+<base_path>/<obsid>/event_cl/
+    nu<obsid>A01_cl.evt.gz    ← FPM-A cleaned events
+    nu<obsid>B01_cl.evt.gz    ← FPM-B cleaned events
+    nu<obsid>A01_ex.img       ← FPM-A exposure map
+    nu<obsid>B01_ex.img       ← FPM-B exposure map
+```
 
-This tool bypasses the standard pipeline and works directly with the cleaned event
-lists (`_cl.evt.gz`), which are the product of `nupipeline` and contain photon arrival
-times, positions, and energies that have already been:
+Outputs are written to `<base_path>/<obsid>/ul_products/`.
 
-- Filtered for good time intervals (GTIs)
-- Corrected for detector patterns (hot pixels, bad columns)
-- Transformed into sky (RA/Dec) coordinates
+---
 
-### What the pipeline does
+## Configuration reference
 
-1. **Load cleaned events** from `nu{obsid}{A|B}01_cl.evt.gz`
-2. **Define source region**: a circle of chosen radius (arcsec) centred on the
-   optical/radio position of the target
-3. **Define background region**: annulus around source or user-placed circle,
-   avoiding chip gaps, other sources, and readout trails
-4. **Extract counts**:
-   - Count events inside the source circle: $N_s$
-   - Count events inside the background region: $N_b$
-   - Compute the area scaling factor: $\alpha = A_s / A_b$
-   - Background-scaled expected counts in source region: $B = \alpha N_b$
-   - Net (background-subtracted) source counts: $S = N_s - B$
-5. **Compute upper limit** on the true signal counts using Poisson statistics
-6. **Convert** counts → count rate → flux using an energy conversion factor (ECF)
+All parameters are fields of the `Config` dataclass. Pass them as keyword arguments to `run_uplim()`.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `base_path` | — | Root data directory |
+| `obsid` | — | NuSTAR observation ID |
+| `ra` | — | Source RA: `"HH:MM:SS.ss"` or decimal degrees |
+| `dec` | — | Source Dec: `"±DD:MM:SS.ss"` or decimal degrees |
+| `src_radius_arcsec` | `60.0` | Source circle radius (arcsec) |
+| `bkg_radius_arcsec` | `200.0` | Background annulus outer radius (arcsec) |
+| `bkg_inner_factor` | `1.2` | Background inner radius = `src_radius × this` |
+| `psf_fwhm_arcsec` | `18.0` | PSF FWHM for diagnostic plot and PSF-weighted exposure |
+| `energy_band` | `'full'` | `'full'` / `'soft'` / `'hard'` / `'ultrahard'` or `(e_lo, e_hi)` tuple |
+| `modules` | `['A','B']` | FPMs to process |
+| `bkg_mode` | `'annulus'` | `'annulus'` or `'manual'` |
+| `bkg_ra` / `bkg_dec` | `""` | Background circle centre (manual mode only) |
+| `exp_stat` | `'median'` | Primary exposure statistic: `'median'` / `'mean'` / `'psf_weighted'` |
+| `confidence_levels` | `[0.9545, 0.9973]` | One-sided CLs (~2σ and ~3σ) |
+| `save_plots` | `True` | Save diagnostic PNG plots |
 
 ### Energy bands
 
-| Band | PI range | Energy |
-|---|---|---|
-| `soft` | 35–210 | 3–10 keV |
-| `hard` | 210–710 | 10–30 keV |
-| `full` | 35–1935 | 3–79 keV |
-| `ultrahard` | 710–1935 | 30–79 keV |
-| `8-30` (custom) | 160–710 | 8–30 keV |
-
-NuSTAR channels: 1 PI channel = 0.04 keV; offset = 1.6 keV.
-Formula: $\text{PI} = (E_{\text{keV}} - 1.6) / 0.04$
-
----
-
-## Statistical Methods
-
-### Detection significance: Li & Ma (1983)
-
-The significance of a detection (or non-detection) is computed using Li & Ma (1983),
-Eq. 17, which is the standard in high-energy astrophysics:
-
-$$S = \sqrt{2} \left[ N_s \ln\!\left(\frac{1+\alpha}{\alpha} \cdot \frac{N_s}{N_s+N_b}\right) + N_b \ln\!\left((1+\alpha) \cdot \frac{N_b}{N_s+N_b}\right) \right]^{1/2}$$
-
-where $\alpha = A_s / A_b$ is the ratio of source to background region areas.
-
-A positive value indicates a source excess; negative indicates a deficit.
-For non-detections you will typically see $|S| < 3$.
-
-### Upper limit methods
-
-Three methods are available via `--stat-method`:
-
-#### 1. `background_inclusive` (default, recommended)
-
-This is the most rigorous method for low-count X-ray astronomy. It finds the
-signal count upper limit $s_\text{UL}$ such that the probability of observing
-$N_s$ or fewer counts, given signal $s_\text{UL}$ and background $B = \alpha N_b$,
-equals $1 - \text{CL}$:
-
-$$\sum_{k=0}^{N_s} \frac{e^{-(s_\text{UL}+B)} \, (s_\text{UL}+B)^k}{k!} = 1 - \text{CL}$$
-
-This correctly accounts for the background uncertainty by treating the expected
-background as a known nuisance. Solved numerically via `scipy.optimize.brentq`.
-
-**Method**: Kraft, Burrows & Nousek (1991, ApJ 374, 344)
-
-#### 2. `frequentist`
-
-Simple frequentist upper limit on the *total* count rate using the Gehrels (1986)
-approximation, then subtracting the expected background:
-
-$$s_\text{UL} = \text{UL}_\text{Gehrels}(N_s) - B$$
-
-Uses `astropy.stats.poisson_conf_interval` with `interval='frequentist-confidence'`.
-
-Fastest method but slightly conservative when $B$ is large relative to $N_s$.
-
-**Method**: Gehrels (1986, ApJ 303, 336)
-
-#### 3. `bayesian`
-
-Bayesian upper limit using a flat (uniform) prior on the signal and the Poisson
-likelihood. The posterior $p(s \,|\, N_s, B) \propto \text{Pois}(N_s; s+B)$ is
-integrated numerically, and $s_\text{UL}$ is the credible-interval upper bound.
-
-$$\int_0^{s_\text{UL}} p(s \,|\, N_s, B) \, ds = \text{CL}$$
-
-**Method**: Kraft, Burrows & Nousek (1991) Bayesian version
+| Name | Range |
+|------|-------|
+| `'full'` | 3–79 keV |
+| `'soft'` | 3–10 keV |
+| `'hard'` | 10–30 keV |
+| `'ultrahard'` | 30–79 keV |
 
 ### Confidence levels
 
-The default outputs are at **2σ** ($\text{CL} = 0.9545$) and **3σ** ($\text{CL} = 0.9973$).
-Custom levels can be specified with `--confidence`.
+Always quote the CL explicitly in your paper. Common choices (one-sided Gaussian convention):
 
-Note: In X-ray non-detection analyses, the **3σ upper limit** is the standard
-quantity reported in the literature (e.g. "We report a 3σ upper limit of X erg/s").
-
----
-
-## Flux Conversion with WebPIMMS
-
-`nustar_uplim` deliberately **does not convert count rates to flux** — because the
-conversion depends entirely on the spectral model you assume, and that's a scientific
-choice. Instead, the pipeline prints step-by-step WebPIMMS instructions with the
-exact count rate to paste in.
-
-**URL**: https://cxc.harvard.edu/toolkit/pimms.jsp
-
-### How to use
-
-1. Run `nustar_uplim` — it prints something like:
-   ```
-   WebPIMMS Instructions (3sigma UL)
-     Input type:  Count Rate
-     Mission:     NUSTAR
-     Detector:    FPMA
-     Energy:      3.0 to 10.0 keV
-     Count Rate:  1.7600e-04 cts/s   ← paste this
-   ```
-2. Go to WebPIMMS and set:
-   - **Input**: Count Rate → paste the value above
-   - **Mission**: NUSTAR, select the correct FPM (A or B)
-   - **Energy range**: match the band you used
-   - **Model**: choose your spectral model:
-     - Power Law → set photon index Γ (e.g. 2.0)
-     - Black Body → set kT
-     - APEC/MEKAL → set temperature and abundance
-   - **Galactic NH**: use e.g. [the NH calculator](https://www.swift.ac.uk/analysis/nhtot/) for your sky position
-   - **Output**: Flux in your chosen band
-3. Click **Submit** — read off the flux upper limit
-
-This way you are in full control of the spectral assumptions, and WebPIMMS uses the
-official, up-to-date NuSTAR calibration files maintained by the CXC.
+| CL | Gaussian equiv. |
+|----|----------------|
+| 0.9000 | 1.28σ |
+| 0.9500 | 1.64σ |
+| 0.9545 | ~2σ |
+| 0.9900 | 2.33σ |
+| 0.9973 | ~3σ |
 
 ---
 
-## Output Files
+## Output
 
-When `--out-dir` is specified, the following files are written:
+Per module and for the combined FPM-A + FPM-B result, the code prints:
 
-| File | Description |
-|---|---|
-| `step1_sky_image_A.png` | Sky image (log scale) with source region (FPMA) |
-| `step1_sky_image_B.png` | Same for FPMB |
-| `step2_regions_A.png` | Source + background regions overlaid on image |
-| `step3_event_scatter_A.png` | Individual events in source and background regions |
-| `step4_upper_limits_<band>.png` | Bar chart of upper limits at each confidence level |
-| `step5_radial_profile_A.png` | Count surface density vs radius from source |
-| `nustar_uplim_report.png` | Combined single-page report figure |
-| `nustar_uplim_results.json` | Machine-readable results (JSON) |
-| `nustar_uplim_results.txt` | Human-readable plain-text summary |
+```
+  Point estimate  (N_src - B) / t_eff  [NOT an upper limit]
+    = (558 - 515.1) / 40190.0 s
+    = +1.0672e-03 cts/s  ±  8.2341e-04  (1-sigma Poisson)
 
-### JSON output structure
+  Upper limits:
+        CL      Net CR (cts/s)   Kraft S_ul    Kraft CR_ul   Gehrels S_ul  Gehrels CR_ul
+  ---------------------------------------------------------------------------
+    0.9545      +1.0672e-03       83.412     2.0751e-03        83.809     2.0853e-03
+    0.9973      +1.0672e-03      109.109     2.7150e-03       109.622     2.7276e-03
+  ---------------------------------------------------------------------------
+  Divide all count rates by the aperture EEF (~0.80 at 60") to correct for flux outside the aperture.
+```
 
-```json
-{
-  "obsid": "90601606002",
-  "src_ra_deg": 75.057167,
-  "src_dec_deg": -3.347556,
-  "energy_band": "soft",
-  "modules": {
-    "FPMA": {
-      "exposure_s": 45231,
-      "src_counts": 3,
-      "bkg_counts": 48,
-      "alpha": 0.1111,
-      "expected_bkg": 5.33,
-      "net_counts": -2.33,
-      "lima_sigma": -0.91,
-      "upper_limits": {
-        "2sigma": {
-          "confidence": 0.9545,
-          "counts_ul": 4.82,
-          "count_rate_ul": 1.07e-4,
-          "flux_ul_erg_cm2_s": 3.74e-16
-        },
-        "3sigma": {
-          "confidence": 0.9973,
-          "counts_ul": 7.95,
-          "count_rate_ul": 1.76e-4,
-          "flux_ul_erg_cm2_s": 6.16e-16
-        }
-      }
-    }
-  }
-}
+Two diagnostic plots are saved to `ul_products/`:
+- `nustar_radial_FPM{A,B}_{band}keV.png` — log-scale radial surface-density profile
+- `nustar_expmap_hist_FPM{A,B}.png` — exposure-map pixel distribution in the source aperture
+
+---
+
+## Important notes
+
+**EEF correction:** The upper limits are for counts inside the extraction aperture. Divide by the encircled-energy fraction to recover the total source rate. For a 60" aperture: EEF ≈ 0.80 (Harrison et al. 2013, ApJ 770, 103).
+
+**Flux conversion:** To convert from count rate to flux, use a spectral model (e.g. an absorbed power law) in PIMMS, WebPIMMS, or XSPEC with the appropriate column density and photon index for your source.
+
+**Marginal detections:** If the net counts are significantly positive (e.g. net > 3σ above background), you may have a marginal detection rather than a non-detection. Check the radial profile plot and consider a proper detection significance test before reporting upper limits.
+
+---
+
+## Package structure
+
+```
+nustar_uplim/
+├── nustar_uplim/
+│   ├── __init__.py      ← public API
+│   ├── config.py        ← Config dataclass (all user parameters)
+│   ├── coords.py        ← coordinate parsing, sky-to-pixel conversion
+│   ├── exposure.py      ← exposure map statistics
+│   ├── io.py            ← file discovery and FITS loading
+│   ├── statistics.py    ← Kraft, Gehrels, net count rate
+│   ├── plots.py         ← diagnostic plots
+│   └── pipeline.py      ← orchestration, run_uplim()
+├── run_uplim.py         ← standalone script / CLI entry point
+├── requirements.txt
+├── setup.py
+└── README.md
 ```
 
 ---
 
-## NuSTAR File Structure
+## Dependencies
 
-After downloading from the HEASARC archive, an observation has this structure:
-
-```
-{obsid}/
-├── auxil/           ← auxiliary files (orbit, etc.)
-├── event_cl/        ← CLEANED EVENTS (input to this pipeline)
-│   ├── nu{obsid}A01_cl.evt.gz    ← FPMA mode-01 cleaned events ✓
-│   ├── nu{obsid}B01_cl.evt.gz    ← FPMB mode-01 cleaned events ✓
-│   ├── nu{obsid}A01_sk.img.gz    ← FPMA sky image (used for WCS) ✓
-│   ├── nu{obsid}B01_sk.img.gz    ← FPMB sky image ✓
-│   ├── nu{obsid}A01_gti.fits.gz  ← Good time intervals
-│   └── ...
-├── event_uf/        ← unfiltered events (not needed here)
-└── hk/              ← housekeeping files
-```
-
-This pipeline uses:
-- `*A01_cl.evt.gz` / `*B01_cl.evt.gz` — cleaned events with X,Y,PI,TIME columns
-- `*A01_sk.img.gz` / `*B01_sk.img.gz` — sky images for WCS coordinate mapping
+- `numpy >= 1.21`
+- `scipy >= 1.7`
+- `astropy >= 5.0`
+- `matplotlib >= 3.4`
 
 ---
 
-## Limitations and Caveats
+## Citation
 
-1. **Vignetting** *(handled if exposure map present)*: NuSTAR's effective area
-   decreases with off-axis angle — roughly a 10% reduction at 2', 30–40% at 6'.
-   The pipeline will automatically apply a vignetting correction if the exposure
-   map file (`nu{obsid}{mod}01_ex.img.gz`) exists in the `event_cl` directory.
-   This file is **not** produced on download — you need to run `nuexpomap` from
-   HEASoft first:
-   ```bash
-   nuexpomap infile=nu90601606002A01_cl.evt.gz \
-             attfile=nu90601606002A.attorb.gz \
-             instrprobmapfile=CALDB ...
-   ```
-   If the file is absent the pipeline prints a warning and proceeds without
-   the correction — acceptable for sources within ~2–3' of the optical axis.
+If you use this code, please cite the upper-limit methods used:
 
-2. **PSF effects**: The NuSTAR PSF has a half-power diameter (HPD) of ~58" and
-   a FWHM of ~18" at 10 keV, with significant power-law wings. A 20" source
-   region (the default) captures ~50% of the HPD; 30" captures ~60%. This means
-   the true source counts are higher than measured — divide the inferred count
-   rate by the enclosed energy fraction (EEF) for your chosen radius. EEF tables
-   for NuSTAR are in the CALDB (`nustar/fpm/bcf/psf/`).
-
-3. **Background spatial uniformity**: The simple area-scaled background assumes
-   the background is spatially flat within the region. The NuSTAR background has
-   gentle gradients, is higher near chip edges and readout nodes, and contains
-   stray light from the optics bench. Use the interactive background mode to
-   place the background region carefully — same chip, similar off-axis angle,
-   avoiding other sources and chip edges.
-
-4. **Mode 01 only**: This pipeline reads mode-01 (standard science mode) events
-   by default. Modes 02–06 (low-efficiency readout, calibration source, etc.) are
-   present in `event_cl` but not merged. For very faint sources you can manually
-   merge the cleaned event files from all modes before running.
-
-5. **No ARF/RMF convolution**: This tool computes count-rate upper limits, not
-   spectra. For a full spectral analysis or to derive ECFs precisely, use
-   Sherpa or pyXSPEC with the observation-specific ARF and RMF files.
-
----
-
-## References
-
-Gehrels, N. 1986, *ApJ*, 303, 336
-— Confidence limits for small numbers of events in astrophysical data
-[Frequentist Poisson intervals]
-
-Kraft, R. P., Burrows, D. N., & Nousek, J. A. 1991, *ApJ*, 374, 344
-— Determination of confidence intervals for the characteristic count rate
-of a Poisson process
-[Background-inclusive and Bayesian upper limits]
-
-Li, T.-P. & Ma, Y.-Q. 1983, *ApJ*, 272, 317
-— Analysis methods for results in gamma-ray astronomy
-[Li-Ma detection significance, Eq. 17]
-
-Wik, D. R. et al. 2014, *ApJ*, 792, 48
-— NuSTAR Observations of the Bullet Cluster
-[NuSTAR energy conversion factors and calibration]
-
-Harrison, F. A. et al. 2013, *ApJ*, 770, 103
-— The Nuclear Spectroscopic Telescope Array (NuSTAR) High-energy X-ray Mission
-[NuSTAR instrument description, PSF, effective area]
-
----
-
-## License
-
-MIT License. See `LICENSE` for details.
-
-## Contributing
-
-Issues and pull requests welcome at https://github.com/your-org/nustar_uplim.
-
-For questions about the science or statistics, please open a GitHub Discussion.
+- **Kraft et al. 1991** — Kraft, R. P., Burrows, D. N., & Nousek, J. A. 1991, ApJ, 374, 344
+- **Gehrels 1986** — Gehrels, N. 1986, ApJ, 303, 336
+- **NuSTAR PSF** — Harrison, F. A., et al. 2013, ApJ, 770, 103
