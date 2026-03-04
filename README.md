@@ -31,11 +31,7 @@ sigma = sqrt(N_src + N_bkg_raw * area_ratio²) / t_eff
 
 ### Effective exposure time
 
-Read from the NuSTAR **exposure map** (not the header `LIVETIME`). The exposure map encodes vignetting, dead-time, and chip gaps in a single image. For a non-detection, the **median** of non-zero exposure-map pixels inside the source aperture is recommended:
-
-- Makes no assumption about PSF shape or source centring
-- Robust against partially-clipped chip-gap edge pixels
-- Easy to justify in a methods section
+Read from the NuSTAR **exposure map** (not the header `LIVETIME`). The exposure map encodes vignetting, dead-time, and chip gaps in a single image. For a non-detection, the **median** of non-zero exposure-map pixels inside the source aperture is used as it makes no assumption about PSF shape or source centring and is robust against partially-clipped chip-gap edge pixels
 
 All three statistics (median, mean, PSF-weighted mean) are always printed for comparison.
 
@@ -150,7 +146,6 @@ All parameters are fields of the `Config` dataclass. Pass them as keyword argume
 | `bkg_ra` / `bkg_dec` | `""` | Background circle centre (manual mode only) |
 | `exp_stat` | `'median'` | Primary exposure statistic: `'median'` / `'mean'` / `'psf_weighted'` |
 | `confidence_levels` | `[0.9545, 0.9973]` | One-sided CLs (~2σ and ~3σ) |
-| `save_plots` | `True` | Save diagnostic PNG plots |
 
 ### Energy bands
 
@@ -163,8 +158,6 @@ All parameters are fields of the `Config` dataclass. Pass them as keyword argume
 
 ### Confidence levels
 
-Always quote the CL explicitly in your paper. Common choices (one-sided Gaussian convention):
-
 | CL | Gaussian equiv. |
 |----|----------------|
 | 0.9000 | 1.28σ |
@@ -174,28 +167,6 @@ Always quote the CL explicitly in your paper. Common choices (one-sided Gaussian
 | 0.9973 | ~3σ |
 
 ---
-
-## Output
-
-Per module and for the combined FPM-A + FPM-B result, the code prints:
-
-```
-  Point estimate  (N_src - B) / t_eff  [NOT an upper limit]
-    = (558 - 515.1) / 40190.0 s
-    = +1.0672e-03 cts/s  ±  8.2341e-04  (1-sigma Poisson)
-
-  Upper limits:
-        CL      Net CR (cts/s)   Kraft S_ul    Kraft CR_ul   Gehrels S_ul  Gehrels CR_ul
-  ---------------------------------------------------------------------------
-    0.9545      +1.0672e-03       83.412     2.0751e-03        83.809     2.0853e-03
-    0.9973      +1.0672e-03      109.109     2.7150e-03       109.622     2.7276e-03
-  ---------------------------------------------------------------------------
-  Divide all count rates by the aperture EEF (~0.80 at 60") to correct for flux outside the aperture.
-```
-
-Two diagnostic plots are saved to `ul_products/`:
-- `nustar_radial_FPM{A,B}_{band}keV.png` — log-scale radial surface-density profile
-- `nustar_expmap_hist_FPM{A,B}.png` — exposure-map pixel distribution in the source aperture
 
 ---
 
@@ -238,11 +209,3 @@ nustar_uplim/
 - `matplotlib >= 3.4`
 
 ---
-
-## Citation
-
-If you use this code, please cite the upper-limit methods used:
-
-- **Kraft et al. 1991** — Kraft, R. P., Burrows, D. N., & Nousek, J. A. 1991, ApJ, 374, 344
-- **Gehrels 1986** — Gehrels, N. 1986, ApJ, 303, 336
-- **NuSTAR PSF** — Harrison, F. A., et al. 2013, ApJ, 770, 103
