@@ -1,3 +1,6 @@
+# Claude workspace
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -23,6 +26,10 @@ results/
 *.pdf
 *.json
 *.txt
+
+# Ignore specific local files
+compare_eef_methods.py
+Sanjana_Comp_Astro_Project_Proposal.pdf
 
 # Virtual environments
 venv/

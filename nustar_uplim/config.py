@@ -41,9 +41,17 @@ class Config:
         Harrison et al. 2013 (ApJ 770, 103): on-axis FWHM ~ 18".
         Increase to ~20-25" for sources more than ~2' off-axis.
     energy_band : str or tuple
-        Named band: 'full' (3-79 keV), 'soft' (3-10 keV),
-                    'hard' (10-30 keV), 'ultrahard' (30-79 keV).
-        Custom band: tuple of (e_lo_kev, e_hi_kev), e.g. (8.0, 30.0).
+        Named band (aligned with NuSTAR CALDB energy files):
+            'full'       3.0–79.0 keV  (all 6 CALDB files, spectrally combined)
+            'extra-soft' 3.0– 4.5 keV
+            'soft'       4.5– 6.0 keV
+            'iron'       6.0– 8.0 keV  (Fe K band)
+            'medium'     8.0–12.0 keV
+            'hard'       12.0–20.0 keV
+            'ultra-hard' 20.0–79.0 keV
+        For any named band other than 'full', exactly one CALDB PSF file is
+        used with no spectral combination required.
+        Custom band: tuple of (e_lo_kev, e_hi_kev), e.g. (8.0, 24.0).
     modules : list of str
         FPMs to process.  Any subset of ['A', 'B'].
     bkg_mode : str
@@ -65,6 +73,12 @@ class Config:
         Common choices (Gaussian convention):
             0.9000 → 1.28σ   0.9500 → 1.64σ
             0.9545 ≈ 2σ      0.9973 ≈ 3σ
+    caldb_dir : str
+        Path to the CALDB root directory (the folder that contains
+        data/nustar/…).  If empty, the $CALDB environment variable is used.
+        Required for EEF computation from the NuSTAR PSF.  If neither
+        caldb_dir nor $CALDB is set, EEF correction is skipped and only
+        aperture count-rate upper limits are reported.
     save_plots : bool
         Whether to save diagnostic plots to <base_path>/<obsid>/ul_products/.
     """
@@ -103,22 +117,52 @@ class Config:
     confidence_levels : List[float] = field(
         default_factory=lambda: [0.9545, 0.9973])
 
+    # -- CALDB ----------------------------------------------------------------
+    caldb_dir : str = ""
+
+    # -- Spectral weighting ---------------------------------------------------
+    psf_gamma : float = 2.0
+    # Photon index used when combining PSF files across energy sub-bands for
+    # the full band (or any custom band spanning multiple CALDB files).
+    # The weight for each sub-band is  integral_{e_lo}^{e_hi} E^{-Gamma} dE.
+    # Gamma=2 is a reasonable prior for X-ray binaries and AGN.
+    # Use Gamma=1.7 for a harder spectrum; Gamma=0 for flat (equal weight per
+    # band).  Has no effect for single-band observations (e.g. 'soft', 'hard').
+
+    # -- Interactive GUI ------------------------------------------------------
+    use_gui : bool = False
+    # When True, opens an interactive matplotlib window before each FPM is
+    # processed so the user can adjust the source and background regions
+    # visually.  Requires a display (not suitable for batch/HPC runs).
+
     # -- Output ---------------------------------------------------------------
     save_plots : bool = True
 
     # -------------------------------------------------------------------------
 
     ENERGY_BANDS = {
-        'full':      (3.0,  79.0),
-        'soft':      (3.0,  10.0),
-        'hard':      (10.0, 30.0),
-        'ultrahard': (30.0, 79.0),
+        'full':       (3.0,  79.0),   # all 6 CALDB energy files combined (Gamma=2 weights)
+        'extra-soft': (3.0,   4.5),   # CALDB nuXX2dpsfen1
+        'soft':       (4.5,   6.0),   # CALDB nuXX2dpsfen2
+        'iron':       (6.0,   8.0),   # CALDB nuXX2dpsfen3  (Fe K band)
+        'medium':     (8.0,  12.0),   # CALDB nuXX2dpsfen4
+        'hard':       (12.0, 20.0),   # CALDB nuXX2dpsfen5
+        'ultra-hard': (20.0, 79.0),   # CALDB nuXX2dpsfen6
     }
 
     def resolve_energy_band(self):
         """Return (e_lo, e_hi) in keV."""
         if isinstance(self.energy_band, tuple):
             return float(self.energy_band[0]), float(self.energy_band[1])
+
+        # Accept string representations of tuples e.g. "(8.0, 24.0)"
+        if isinstance(self.energy_band, str):
+            import re
+            m = re.fullmatch(r'\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)',
+                             self.energy_band.strip())
+            if m:
+                return float(m.group(1)), float(m.group(2))
+
         key = self.energy_band.lower()
         if key not in self.ENERGY_BANDS:
             raise ValueError(
@@ -141,6 +185,9 @@ class Config:
             raise ValueError(
                 f"exp_stat must be 'median', 'mean', or 'psf_weighted', "
                 f"not '{self.exp_stat}'.")
+        if self.psf_gamma < 0:
+            raise ValueError(
+                f"psf_gamma must be >= 0, not {self.psf_gamma}.")
         for cl in self.confidence_levels:
             if not 0.0 < cl < 1.0:
                 raise ValueError(

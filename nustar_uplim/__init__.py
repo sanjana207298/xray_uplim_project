@@ -14,9 +14,10 @@ Quickstart
 ... )
 """
 
-from .pipeline import run_uplim, process_module, combine_modules
+from .pipeline  import run_uplim, process_module, combine_modules
 from .statistics import kraft_upper_limit, gehrels_upper_limit, net_count_rate
-from .config import Config
+from .config    import Config
+from .eef       import compute_eef
 
 __version__ = "1.0.0"
 __author__  = "Sanjana Gupta"
@@ -28,4 +29,5 @@ __all__ = [
     "gehrels_upper_limit",
     "net_count_rate",
     "Config",
+    "compute_eef",
 ]
