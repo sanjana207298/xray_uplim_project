@@ -1,7 +1,7 @@
 """
-nustar_uplim.exposure
----------------------
-Effective exposure time from the NuSTAR exposure map.
+xray_uplim.exposure
+-------------------
+Effective exposure time from an observatory exposure map.
 
 The exposure map encodes vignetting, dead-time, and chip gaps in a single
 image (units: seconds).  For a non-detection we summarise the pixel values

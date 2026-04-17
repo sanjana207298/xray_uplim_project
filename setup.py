@@ -1,10 +1,10 @@
 from setuptools import setup, find_packages
 
 setup(
-    name             = "nustar_uplim",
-    version          = "1.0.0",
+    name             = "xray_uplim",
+    version          = "2.0.0",
     author           = "Sanjana Gupta",
-    description      = "NuSTAR count-rate upper limits for non-detections",
+    description      = "Unified X-ray non-detection upper limit calculator (NuSTAR, XMM-Newton, Swift, Chandra)",
     long_description = open("README.md").read(),
     long_description_content_type = "text/markdown",
     packages         = find_packages(),
@@ -17,7 +17,7 @@ setup(
     ],
     entry_points = {
         "console_scripts": [
-            "nustar-uplim=nustar_uplim.pipeline:run_uplim",
+            "xray-uplim=xray_uplim.nustar.pipeline:run_uplim",
         ],
     },
     classifiers = [

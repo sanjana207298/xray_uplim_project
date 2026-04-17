@@ -1,7 +1,7 @@
 """
-nustar_uplim.statistics
------------------------
-Count-rate estimation methods for NuSTAR non-detections.
+xray_uplim.statistics
+---------------------
+Count-rate estimation methods shared across all observatory modules.
 
 Three methods are implemented:
 

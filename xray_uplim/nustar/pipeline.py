@@ -1,6 +1,6 @@
 """
-nustar_uplim.pipeline
----------------------
+xray_uplim.nustar.pipeline
+--------------------------
 Top-level orchestration: per-module extraction and combined results.
 
 Public API
@@ -15,13 +15,14 @@ import os
 import warnings
 import numpy as np
 
-from .config     import Config
-from .coords     import parse_coord, sky_to_evt_pixel, sky_to_img_pixel
-from .eef        import compute_eef
-from .exposure   import compute_exposure_stats
-from .io         import locate_files, load_events, load_expmap
-from .statistics import net_count_rate, kraft_upper_limit, gehrels_upper_limit
-from .plots      import radial_profile, exposure_histogram, region_image
+from .config      import Config
+from .coords      import sky_to_evt_pixel
+from .io          import locate_files, load_events, load_expmap
+from ..coords     import parse_coord, sky_to_img_pixel
+from ..eef        import compute_eef
+from ..exposure   import compute_exposure_stats
+from ..statistics import net_count_rate, kraft_upper_limit, gehrels_upper_limit
+from ..plots      import radial_profile, exposure_histogram, region_image
 
 
 # =============================================================================
@@ -299,7 +300,7 @@ def process_module(module, src_coord, cfg):
     bkg_cy_evt = cy_evt
 
     if cfg.use_gui:
-        from .region_selector import select_regions_interactive
+        from ..region_selector import select_regions_interactive
         print(f"\n  Opening interactive region selector for FPM{module}...")
         sel = select_regions_interactive(
             evt_x, evt_y, cx_evt, cy_evt, pscale_evt, cfg, module)

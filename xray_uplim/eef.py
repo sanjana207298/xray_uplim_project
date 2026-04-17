@@ -1,6 +1,6 @@
 """
-nustar_uplim.eef
-----------------
+xray_uplim.eef
+--------------
 Encircled Energy Fraction (EEF) calculation from the NuSTAR CALDB PSF.
 
 Physics

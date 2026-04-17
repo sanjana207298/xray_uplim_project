@@ -1,6 +1,6 @@
 """
-nustar_uplim.io
----------------
+xray_uplim.nustar.io
+--------------------
 File discovery and FITS loading for NuSTAR nupipeline products.
 
 Expected directory layout (standard nupipeline output)

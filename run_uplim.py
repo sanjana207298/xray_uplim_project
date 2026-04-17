@@ -2,17 +2,17 @@
 """
 run_uplim.py
 ------------
-Command-line entry point for nustar_uplim.
+Command-line entry point for xray_uplim.
 
 Edit the CONFIG block below and run:
     python run_uplim.py
 
 Or import and call from a notebook:
-    from nustar_uplim import run_uplim
+    from xray_uplim.nustar import run_uplim
     run_uplim(base_path=..., obsid=..., ra=..., dec=...)
 """
 
-from nustar_uplim import run_uplim
+from xray_uplim.nustar import run_uplim
 
 # =============================================================================
 # CONFIG  — edit this block

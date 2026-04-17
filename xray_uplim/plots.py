@@ -1,6 +1,6 @@
 """
-nustar_uplim.plots
-------------------
+xray_uplim.plots
+----------------
 Diagnostic plots saved to <base_path>/<obsid>/ul_products/.
 
 radial_profile()

@@ -1,45 +1,19 @@
 """
-nustar_uplim.coords
--------------------
-Coordinate parsing and sky-to-pixel conversion for NuSTAR data.
+xray_uplim.nustar.coords
+------------------------
+NuSTAR-specific sky-to-pixel conversion for event files.
 
-The key function here is sky_to_evt_pixel(), which reads the per-column
-WCS keywords from NuSTAR EVENTS binary table headers rather than the
-primary-array WCS used by astropy.wcs.WCS.  Using WCS(evt_hdr, naxis=2)
-on a NuSTAR event file reads wrong or missing CRPIX/CRVAL/CDELT keywords
-and produces completely incorrect pixel positions (landing outside the
-detector), yielding zero counts in every aperture.
+NuSTAR event files store the sky projection in *per-column* WCS keywords
+inside the EVENTS binary table (TCTYPn, TCRPXn, TCRVLn, TCDLTn) rather
+than the primary-array WCS keywords.  astropy's WCS(header, naxis=2)
+reads the primary-array keywords, which are absent or unrelated in event
+files, producing completely wrong pixel positions.  sky_to_evt_pixel()
+reads the correct column-level keywords directly.
+
+For shared utilities (parse_coord, sky_to_img_pixel) see xray_uplim.coords.
 """
 
 import numpy as np
-from astropy.io import fits
-from astropy.wcs import WCS
-from astropy.coordinates import SkyCoord
-import astropy.units as u
-
-
-def parse_coord(ra_str, dec_str):
-    """
-    Parse an (RA, Dec) pair into an astropy SkyCoord.
-
-    Accepts
-    -------
-    Decimal degrees  :  304.297   58.202
-    Sexagesimal      : "20:17:11.360"   "+58:12:08.10"
-    astropy strings  : "20h17m11.36s"  "+58d12m08.1s"
-
-    Returns
-    -------
-    astropy.coordinates.SkyCoord (ICRS)
-    """
-    try:
-        return SkyCoord(ra=float(ra_str)*u.deg,
-                        dec=float(dec_str)*u.deg, frame='icrs')
-    except (ValueError, TypeError):
-        pass
-    ra_fmt  = str(ra_str).replace(':', 'h', 1).replace(':', 'm', 1) + 's'
-    dec_fmt = str(dec_str).replace(':', 'd', 1).replace(':', 'm', 1) + 's'
-    return SkyCoord(ra_fmt, dec_fmt, frame='icrs')
 
 
 def sky_to_evt_pixel(ra_deg, dec_deg, evt_hdr):
@@ -106,39 +80,5 @@ def sky_to_evt_pixel(ra_deg, dec_deg, evt_hdr):
     cy = crpx_y + (dec_deg - crvl_y)            / cdlt_y
 
     pscale = abs(cdlt_y) * 3600.0   # arcsec/pixel from Dec axis
-
-    return cx, cy, pscale
-
-
-def sky_to_img_pixel(ra_deg, dec_deg, img_hdr):
-    """
-    Convert RA/Dec to pixel position in a standard FITS image (exposure map).
-    The NuSTAR exposure map uses a normal image WCS, so astropy WCS works.
-
-    Parameters
-    ----------
-    ra_deg, dec_deg : float
-    img_hdr         : astropy.io.fits.Header  (primary image HDU)
-
-    Returns
-    -------
-    cx, cy  : float
-    pscale  : float  — arcsec/pix
-    """
-    wcs    = WCS(img_hdr, naxis=2)
-    cx, cy = wcs.all_world2pix([[ra_deg, dec_deg]], 0)[0]
-
-    pscale = None
-    for key in ('CDELT2', 'CD2_2'):
-        if key in img_hdr:
-            pscale = abs(img_hdr[key]) * 3600.0
-            break
-    if pscale is None:
-        import warnings
-        warnings.warn(
-            "Pixel scale not found in exposure-map header; "
-            "using NuSTAR default 2.459 \"/pix.",
-            RuntimeWarning, stacklevel=2)
-        pscale = 2.459
 
     return cx, cy, pscale

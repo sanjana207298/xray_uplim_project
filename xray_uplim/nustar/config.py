@@ -1,6 +1,6 @@
 """
-nustar_uplim.config
--------------------
+xray_uplim.nustar.config
+------------------------
 Single dataclass holding every user-facing parameter.
 Pass a Config instance to run_uplim() or process_module().
 """
