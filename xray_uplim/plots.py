@@ -38,7 +38,7 @@ matplotlib.rcParams.update({
     'xtick.labelsize':    10,
     'ytick.labelsize':    10,
     'legend.fontsize':    9,
-    'figure.dpi':         150,
+    'figure.dpi':         300,
 })
 
 
@@ -71,18 +71,18 @@ def radial_profile(evt_x, evt_y, cx_evt, cy_evt, pscale_evt,
     areas  = np.pi * (edges[1:]**2 - edges[:-1]**2)
     surf   = np.where(areas > 0, counts / areas, 0.0)
 
-    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    fig, ax = plt.subplots(figsize=(6.0, 3.8))
     ax.step(mids, np.where(surf > 0, surf, np.nan),
-            where='mid', color='steelblue', lw=1.5, label='Binned events')
+            where='mid', color='navy', lw=2.0, label='Binned events')
 
     r_inner = cfg.src_radius_arcsec * cfg.bkg_inner_factor
-    ax.axvline(cfg.src_radius_arcsec, color='tomato', ls='--', lw=1.3,
+    ax.axvline(cfg.src_radius_arcsec, color='orangered', ls='--', lw=2.0,
                label=f'Src aperture ({cfg.src_radius_arcsec:.0f}")')
-    ax.axvline(r_inner, color='darkorange', ls=':', lw=1.2,
+    ax.axvline(r_inner, color='limegreen', ls=':', lw=2.0,
                label=f'Bkg inner ({r_inner:.0f}")')
-    ax.axvline(cfg.bkg_radius_arcsec, color='darkorange', ls='--', lw=1.2,
+    ax.axvline(cfg.bkg_radius_arcsec, color='limegreen', ls='--', lw=2.0,
                label=f'Bkg outer ({cfg.bkg_radius_arcsec:.0f}")')
-    ax.axvline(cfg.psf_fwhm_arcsec / 2.0, color='grey', ls=':', lw=1.0,
+    ax.axvline(cfg.psf_fwhm_arcsec / 2.0, color='grey', ls=':', lw=2.0,
                label=f'PSF half-FWHM ({cfg.psf_fwhm_arcsec/2:.0f}")')
 
     ax.set_xlabel('Radius (arcsec)')
@@ -96,7 +96,7 @@ def radial_profile(evt_x, evt_y, cx_evt, cy_evt, pscale_evt,
 
     fname = os.path.join(
         out_dir, f"radial_{label}_{e_lo:.1f}-{e_hi:.1f}keV.png")
-    fig.savefig(fname, dpi=150, bbox_inches='tight')
+    fig.savefig(fname, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"  Radial profile plot  -> {fname}")
 
@@ -118,19 +118,19 @@ def exposure_histogram(meta, exp_stats, label, cfg, out_dir):
     out_dir   : str
     """
     vals = meta['exp_values']
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.hist(vals / 1e3, bins=30, color='steelblue',
+    fig, ax = plt.subplots(figsize=(5.8, 3.5))
+    ax.hist(vals / 1e3, bins=30, color='navy',
             edgecolor='white', linewidth=0.5, alpha=0.8,
             label='Exposure-map pixels in aperture')
 
     styles = {
-        'median':       ('tomato',     '--', 'Median'),
-        'mean':         ('darkorange', '--', 'Mean'),
-        'psf_weighted': ('purple',     ':',  'PSF-wtd mean'),
+        'median':       ('orangered',        '--', 'Median'),
+        'mean':         ('limegreen',        '--', 'Mean'),
+        'psf_weighted': ('magenta',  ':',  'PSF-wtd mean'),
     }
     for key, (col, ls, lbl) in styles.items():
         tag = '  [PRIMARY]' if key == cfg.exp_stat else ''
-        ax.axvline(exp_stats[key] / 1e3, color=col, ls=ls, lw=1.8,
+        ax.axvline(exp_stats[key] / 1e3, color=col, ls=ls, lw=2.0,
                    label=f"{lbl} = {exp_stats[key]/1e3:.2f} ks{tag}")
 
     ax.set_xlabel('Exposure time (ks)')
@@ -142,7 +142,7 @@ def exposure_histogram(meta, exp_stats, label, cfg, out_dir):
     fig.tight_layout()
 
     fname = os.path.join(out_dir, f"expmap_hist_{label}.png")
-    fig.savefig(fname, dpi=150, bbox_inches='tight')
+    fig.savefig(fname, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f"  Exposure histogram   -> {fname}")
 
@@ -228,7 +228,7 @@ def region_image(evt_x, evt_y, cx_evt, cy_evt, pscale_evt,
     bkg_dy_as = (bkg_cy_evt - cy_evt) * pscale_evt
 
     # ---- Figure -------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(6.5, 6.0))
+    fig, ax = plt.subplots(figsize=(5.5, 5.0))
 
     vmax = max(1, np.percentile(img[img > 0], 99)) if img.any() else 1
     ax.imshow(img, origin='lower', extent=extent,
@@ -239,11 +239,11 @@ def region_image(evt_x, evt_y, cx_evt, cy_evt, pscale_evt,
     r_src = cfg.src_radius_arcsec
     ax.add_patch(Circle((0, 0), r_src,
                          edgecolor='tomato', facecolor='none',
-                         linewidth=1.8, linestyle='--',
+                         linewidth=2.2, linestyle='--',
                          label=f'Source ({r_src:.0f}")'))
     ch = r_src * 0.15
-    ax.plot([-ch, ch], [0, 0], color='tomato', lw=0.8)
-    ax.plot([0, 0],    [-ch, ch], color='tomato', lw=0.8)
+    ax.plot([-ch, ch], [0, 0], color='tomato', lw=1.2)
+    ax.plot([0, 0],    [-ch, ch], color='tomato', lw=1.2)
 
     # Background region
     r_out = cfg.bkg_radius_arcsec
@@ -251,20 +251,20 @@ def region_image(evt_x, evt_y, cx_evt, cy_evt, pscale_evt,
         # Manual mode: single circle at background centre, no inner annulus
         ax.add_patch(Circle((bkg_dx_as, bkg_dy_as), r_out,
                              edgecolor='orange', facecolor='none',
-                             linewidth=1.5, linestyle='-',
+                             linewidth=2.0, linestyle='-',
                              label=f'Background ({r_out:.0f}")'))
         ax.plot([bkg_dx_as], [bkg_dy_as], '+', color='orange',
-                markersize=8, markeredgewidth=1.2)
+                markersize=8, markeredgewidth=1.6)
     else:
         # Annulus mode: inner + outer circles around source
         r_in = r_src * cfg.bkg_inner_factor
         ax.add_patch(Circle((0, 0), r_out,
                              edgecolor='orange', facecolor='none',
-                             linewidth=1.5, linestyle='-',
+                             linewidth=2.0, linestyle='-',
                              label=f'Bkg outer ({r_out:.0f}")'))
         ax.add_patch(Circle((0, 0), r_in,
                              edgecolor='orange', facecolor='none',
-                             linewidth=1.2, linestyle=':',
+                             linewidth=1.7, linestyle=':',
                              label=f'Bkg inner ({r_in:.0f}")'))
 
     ax.legend(loc='upper right', framealpha=0.8, fontsize=8)

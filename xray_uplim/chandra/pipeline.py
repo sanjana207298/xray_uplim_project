@@ -551,11 +551,11 @@ def process_observation(cfg: ChandraConfig):
         E_s, E_b, A_s, A_b, ul, energy, eef_info, csv_rows
     """
     e_lo_kev, e_hi_kev, e_lo_ev, e_hi_ev, ref_kev = cfg.resolve_energy_band()
-    out_dir  = os.path.join(cfg.base_path, 'ul_products')
+    obsids      = cfg.obsids
+    n_obs       = len(obsids)
+    obsid_label = obsids[0] if n_obs == 1 else "+".join(obsids)
+    out_dir     = os.path.join(cfg.base_path, obsid_label, 'ul_products')
     os.makedirs(out_dir, exist_ok=True)
-
-    obsids = cfg.obsids
-    n_obs  = len(obsids)
 
     # Save original aperture/background settings for per-obs GUI restore
     _orig = {k: getattr(cfg, k) for k in (
@@ -827,24 +827,24 @@ def _save_plots(obs_raw, cfg, out_dir, e_lo, e_hi):
         vmin, vmax = zscale.get_limits(img_data)
         vmax = max(vmax, vmin + 1)
 
-        fig, ax = plt.subplots(figsize=(7, 6))
+        fig, ax = plt.subplots(figsize=(5.5, 5.0))
         ax.imshow(img_data, origin='lower', cmap='gray',
                   vmin=vmin, vmax=vmax, interpolation='nearest')
 
         ax.add_patch(mpatches.Circle(
             (src_cx, src_cy), src_r_pix,
-            color='lime', fill=False, lw=1.5, label='Source'))
+            color='tomato', fill=False, lw=2.0, label='Source'))
         if cfg.bkg_mode == 'annulus':
             ax.add_patch(mpatches.Circle(
                 (src_cx, src_cy), bkg_in_pix,
-                color='cyan', fill=False, lw=1.0, linestyle='--'))
+                color='orange', fill=False, lw=1.5, linestyle='--'))
             ax.add_patch(mpatches.Circle(
                 (src_cx, src_cy), bkg_r_pix,
-                color='cyan', fill=False, lw=1.5, label='Bkg'))
+                color='orange', fill=False, lw=2.0, label='Bkg'))
         else:
             ax.add_patch(mpatches.Circle(
                 (bkg_cx, bkg_cy), bkg_r_pix,
-                color='cyan', fill=False, lw=1.5, label='Bkg'))
+                color='orange', fill=False, lw=2.0, label='Bkg'))
 
         ax.set_title(
             f"Chandra ACIS  {obs_raw['obsid_str']}  "
@@ -858,7 +858,7 @@ def _save_plots(obs_raw, cfg, out_dir, e_lo, e_hi):
         fname = os.path.join(
             out_dir,
             f"chandra_regions_{obs_raw['obsid_str']}_{e_lo:.1f}-{e_hi:.1f}keV.png")
-        fig.savefig(fname, dpi=120, bbox_inches='tight')
+        fig.savefig(fname, dpi=300, bbox_inches='tight')
         plt.close(fig)
         print(f"  Region image saved: {os.path.basename(fname)}")
 
@@ -902,9 +902,10 @@ def run_uplim(base_path, obsid, ra, dec, **kwargs):
     cfg.validate()
 
     e_lo_kev, e_hi_kev, *_ = cfg.resolve_energy_band()
-    src_coord = parse_coord(cfg.ra, cfg.dec)
-    obsids    = cfg.obsids
-    out_dir   = os.path.join(cfg.base_path, 'ul_products')
+    src_coord   = parse_coord(cfg.ra, cfg.dec)
+    obsids      = cfg.obsids
+    obsid_label = obsids[0] if len(obsids) == 1 else "+".join(obsids)
+    out_dir     = os.path.join(cfg.base_path, obsid_label, 'ul_products')
 
     print("Chandra ACIS Non-Detection Upper Limit")
     print("=" * 70)

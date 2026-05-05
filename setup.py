@@ -15,9 +15,16 @@ setup(
         "astropy>=5.0",
         "matplotlib>=3.4",
     ],
+    extras_require = {
+        "gui": ["PySide6>=6.4"],
+        "cli": ["pyyaml>=6.0"],
+    },
     entry_points = {
         "console_scripts": [
-            "xray-uplim=xray_uplim.nustar.pipeline:run_uplim",
+            # GUI launcher (falls back to CLI if PySide6 is missing)
+            "xray_uplim     = xray_uplim.__main__:main",
+            # CLI-only launcher (YAML/JSON config file)
+            "xray_uplim-cli = xray_uplim.cli:main",
         ],
     },
     classifiers = [

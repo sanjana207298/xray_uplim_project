@@ -478,11 +478,11 @@ def process_observation(cfg: SwiftConfig):
         net_counts, t_eff_s, exp_stats, ul, energy, eef_info, csv_rows
     """
     e_lo, e_hi = cfg.resolve_energy_band()
-    out_dir    = os.path.join(cfg.data_dir, "ul_products")
+    obsids     = cfg.obsids
+    n_obs      = len(obsids)
+    obsid_label = obsids[0] if n_obs == 1 else "+".join(obsids)
+    out_dir    = os.path.join(cfg.data_dir, obsid_label, "ul_products")
     os.makedirs(out_dir, exist_ok=True)
-
-    obsids = cfg.obsids
-    n_obs  = len(obsids)
 
     # Save the original aperture/background settings so we can restore them
     # for each observation in per_obs GUI mode.
@@ -775,10 +775,11 @@ def run_uplim(data_dir, obsid, ra, dec, **kwargs):
     cfg = SwiftConfig(data_dir=data_dir, obsid=obsid, ra=ra, dec=dec, **kwargs)
     cfg.validate()
 
-    e_lo, e_hi = cfg.resolve_energy_band()
-    src_coord  = parse_coord(cfg.ra, cfg.dec)
-    out_dir    = os.path.join(cfg.data_dir, "ul_products")
-    obsids     = cfg.obsids
+    e_lo, e_hi  = cfg.resolve_energy_band()
+    src_coord   = parse_coord(cfg.ra, cfg.dec)
+    obsids      = cfg.obsids
+    obsid_label = obsids[0] if len(obsids) == 1 else "+".join(obsids)
+    out_dir     = os.path.join(cfg.data_dir, obsid_label, "ul_products")
 
     print("Swift XRT Non-Detection Upper Limit")
     print("=" * 70)
